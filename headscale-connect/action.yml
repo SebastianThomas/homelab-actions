@@ -1,0 +1,50 @@
+name: Headscale connect
+description: >
+  Join the Headscale tailnet on a GitHub runner so the job can reach private
+  MagicDNS names (e.g. kube-cp-01.ts.<domain>) and a tailnet-only Kubernetes
+  API. Thin wrapper over tailscale/github-action that bakes in the
+  --login-server + --accept-dns convention and a clean node name. The node is
+  ephemeral - tailscale/github-action logs it out when the job finishes.
+
+    - uses: SebastianThomas/homelab-actions/headscale-connect@v1
+      with:
+        auth-key:     ${{ secrets.TS_AUTHKEY }}
+        login-server: ${{ secrets.HEADSCALE_URL }}
+
+inputs:
+  auth-key:
+    description: >
+      Headscale pre-auth key. Create it reusable + ephemeral with a long expiry:
+        headscale preauthkeys create --user <id> --reusable --ephemeral --expiration 100y
+    required: true
+  login-server:
+    description: Headscale control server URL (e.g. https://headscale.example.com).
+    required: true
+  hostname:
+    description: Tailnet node name. Empty = gha-<repo>.
+    required: false
+    default: ""
+  ping:
+    description: >
+      MagicDNS name to `tailscale ping` right after joining, as a connectivity
+      gate (e.g. "kube-cp-01"). Empty = skip.
+    required: false
+    default: ""
+
+runs:
+  using: composite
+  steps:
+    - id: cfg
+      shell: bash
+      run: |
+        name='${{ inputs.hostname }}'
+        [ -n "$name" ] || name="gha-${GITHUB_REPOSITORY##*/}"
+        echo "hostname=$name" >> "$GITHUB_OUTPUT"
+
+    - uses: tailscale/github-action@v4
+      with:
+        authkey: ${{ inputs.auth-key }}
+        hostname: ${{ steps.cfg.outputs.hostname }}
+        # --accept-dns so the runner resolves *.ts.<domain> via MagicDNS.
+        args: --login-server=${{ inputs.login-server }} --accept-dns
+        ping: ${{ inputs.ping }}

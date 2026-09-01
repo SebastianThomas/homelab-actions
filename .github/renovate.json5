@@ -1,0 +1,21 @@
+{
+  $schema: 'https://docs.renovatebot.com/renovate-schema.json',
+  extends: [
+    'config:recommended',
+    ':dependencyDashboard',
+    ':semanticCommitsDisabled',
+  ],
+  timezone: 'Europe/Zurich',
+  schedule: ['before 6am on monday'],
+  labels: ['dependencies'],
+
+  packageRules: [
+    // The actions we wrap (tailscale, setup-kubectl): group, auto-merge minor/patch.
+    {
+      matchManagers: ['github-actions'],
+      matchUpdateTypes: ['minor', 'patch', 'digest'],
+      groupName: 'github-actions',
+      automerge: true,
+    },
+  ],
+}

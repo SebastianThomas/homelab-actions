@@ -1,0 +1,103 @@
+name: Deploy to homelab k8s
+description: >
+  Apply an app's own manifests to its namespace on the homelab cluster using a
+  namespace-scoped `deployer` ServiceAccount token, then wait for the rollout.
+  Run headscale-connect first when the cluster API is tailnet-only.
+
+    - uses: SebastianThomas/homelab-actions/kube-deploy@v1
+      with:
+        server:    ${{ secrets.KUBE_API }}
+        ca:        ${{ secrets.KUBE_CA }}
+        token:     ${{ secrets.KUBE_TOKEN }}
+        namespace: myapp
+        image:     ghcr.io/${{ github.repository }}:${{ github.ref_name }}
+
+  Manifests may contain the literal ${APP_IMAGE}; it is replaced with `image`
+  before apply. The namespace, RBAC, database and HTTPRoute are provisioned once
+  by homelab-infra (kubernetes/apps/<app>/) - this only ships the workload.
+
+inputs:
+  server:
+    description: Kubernetes API URL (the KUBE_API secret).
+    required: true
+  ca:
+    description: >
+      Base64 cluster CA cert - the `ca.crt` value straight from the
+      deployer-token Secret (already base64), i.e. the KUBE_CA secret.
+    required: true
+  token:
+    description: The `deployer` ServiceAccount token (the KUBE_TOKEN secret).
+    required: true
+  namespace:
+    description: >
+      Target namespace. Also the default rollout target (deployment/<namespace>),
+      per the homelab convention app-name = namespace = Deployment name.
+    required: true
+  manifests:
+    description: Directory in the caller repo with the manifests (+ optional kustomization.yaml).
+    required: false
+    default: deploy
+  image:
+    description: Image ref substituted for ${APP_IMAGE}. Empty = no substitution.
+    required: false
+    default: ""
+  wait:
+    description: Run `kubectl rollout status` after apply.
+    required: false
+    default: "true"
+  rollout:
+    description: Rollout target to wait on. Empty = deployment/<namespace>.
+    required: false
+    default: ""
+  rollout-timeout:
+    description: Passed to `kubectl rollout status --timeout`.
+    required: false
+    default: 180s
+
+runs:
+  using: composite
+  steps:
+    - uses: azure/setup-kubectl@v5
+
+    - name: Write kubeconfig
+      shell: bash
+      run: |
+        umask 077 && mkdir -p ~/.kube
+        cat > ~/.kube/config <<EOF
+        apiVersion: v1
+        kind: Config
+        clusters:
+          - name: homelab
+            cluster:
+              server: ${{ inputs.server }}
+              certificate-authority-data: ${{ inputs.ca }}
+        users:
+          - name: deployer
+            user:
+              token: ${{ inputs.token }}
+        contexts:
+          - name: homelab
+            context: { cluster: homelab, user: deployer, namespace: ${{ inputs.namespace }} }
+        current-context: homelab
+        EOF
+
+    - name: Render + apply
+      shell: bash
+      env:
+        APP_IMAGE: ${{ inputs.image }}
+        NS: ${{ inputs.namespace }}
+        SRC: ${{ inputs.manifests }}
+        DO_WAIT: ${{ inputs.wait }}
+        ROLLOUT: ${{ inputs.rollout }}
+        TIMEOUT: ${{ inputs.rollout-timeout }}
+      run: |
+        set -euo pipefail
+        if [ -f "${SRC}/kustomization.yaml" ]; then
+          render() { kubectl kustomize "${SRC}"; }
+        else
+          render() { cat "${SRC}"/*.yaml "${SRC}"/*.yml 2>/dev/null; }
+        fi
+        render | envsubst '$APP_IMAGE' | kubectl apply -n "${NS}" -f -
+        if [ "${DO_WAIT}" = "true" ]; then
+          kubectl -n "${NS}" rollout status "${ROLLOUT:-deployment/${NS}}" --timeout="${TIMEOUT}"
+        fi
