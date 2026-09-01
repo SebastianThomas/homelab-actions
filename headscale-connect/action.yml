@@ -1,17 +1,17 @@
 name: Headscale connect
 description: >-
   Join the Headscale tailnet on a GitHub runner so the job can reach private
-  MagicDNS names and a tailnet-only Kubernetes API. Installs tailscale and runs
-  `tailscale up` directly (no tailscale/github-action wrapper - that deprecates
-  authkeys in favour of Tailscale-SaaS OAuth clients, which Headscale has no
-  equivalent for). Ephemeral node, per-run name, bounded connectivity check.
-  Usage: see the repo README.
+  MagicDNS names and a tailnet-only Kubernetes API. Installs tailscale from the
+  static tarball (skips the slow `apt update`) and runs `tailscale up` directly
+  - no tailscale/github-action wrapper, which deprecates authkeys for
+  Tailscale-SaaS OAuth (Headscale has no equivalent). Ephemeral node, per-run
+  name, bounded connectivity check. Usage: see the repo README.
 
 inputs:
   auth-key:
     description: >
       Headscale pre-auth key. Create it reusable + ephemeral with a long expiry:
-        headscale preauthkeys create --user <id> --reusable --ephemeral --expiration 100y
+        headscale preauthkeys create --user <id> --reusable --ephemeral --expiration 87600h
     required: true
   login-server:
     description: Headscale control server URL (e.g. https://headscale.example.com).
@@ -60,26 +60,37 @@ runs:
       run: |
         set -euo pipefail
 
-        command -v tailscale >/dev/null || curl -fsSL https://tailscale.com/install.sh | sh
+        if ! command -v tailscale >/dev/null; then
+          arch=$(dpkg --print-architecture 2>/dev/null || echo amd64)   # amd64 / arm64
+          ver=$(curl -fsSL --retry 3 'https://pkgs.tailscale.com/stable/?mode=json' | jq -r .TarballsVersion)
+          echo "installing tailscale ${ver} (${arch}) from tarball"
+          curl -fsSL --retry 3 "https://pkgs.tailscale.com/stable/tailscale_${ver}_${arch}.tgz" -o /tmp/ts.tgz
+          tar -xzf /tmp/ts.tgz -C /tmp
+          d="/tmp/tailscale_${ver}_${arch}"
+          sudo install -m0755 "$d/tailscale"  /usr/bin/tailscale
+          sudo install -m0755 "$d/tailscaled" /usr/sbin/tailscaled
+          sudo install -m0644 "$d/systemd/tailscaled.service"  /etc/systemd/system/tailscaled.service
+          sudo install -m0644 "$d/systemd/tailscaled.defaults" /etc/default/tailscaled
+          sudo mkdir -p /var/lib/tailscale
+          sudo systemctl daemon-reload
+        fi
+        sudo systemctl enable --now tailscaled
+        for _ in $(seq 1 20); do [ -S /run/tailscale/tailscaled.sock ] && break; sleep 0.5; done
 
-        # Ephemeral: Headscale drops the node once this runner disconnects (the
-        # hosted VM is destroyed at job end), so there's no logout to run.
+        # --operator so later `tailscale` CLI calls (and this step's) don't need sudo
         sudo tailscale up \
           --login-server="$LOGIN_SERVER" \
           --authkey="$TS_AUTHKEY" \
           --hostname="$TS_HOSTNAME" \
-          --accept-dns \
-          --timeout=60s
+          --operator="${USER:-runner}" \
+          --timeout=120s
 
         [ -n "$PING_TARGET" ] || exit 0
         echo "Waiting for $PING_TARGET over the tailnet..."
         for _ in $(seq 1 30); do
-          if tailscale ping -c 1 --timeout 3s "$PING_TARGET" >/dev/null 2>&1; then
-            echo "$PING_TARGET reachable"; exit 0
-          fi
+          tailscale ping -c 1 --timeout 3s "$PING_TARGET" >/dev/null 2>&1 && { echo "$PING_TARGET reachable"; exit 0; }
           sleep 2
         done
         echo "::error::$PING_TARGET not reachable over the tailnet after ~2 min"
-        tailscale ping -c 1 "$PING_TARGET" || true
         tailscale status || true
         exit 1
