@@ -1,0 +1,74 @@
+name: CNPG cluster
+description: >-
+  Apply a CloudNativePG Cluster manifest (a deploy dir - kustomize or plain
+  yaml) to a namespace and wait until every Cluster in it reports Ready. The
+  operator and the image catalog live in homelab-infra; this only creates or
+  reconciles the per-app Cluster - kept as its own step/workflow so DB
+  provisioning never runs as a side effect of an app deploy. Run
+  headscale-connect first when the API is tailnet-only. Usage: see the repo
+  README.
+
+inputs:
+  server:
+    description: Kubernetes API URL (KUBE_API).
+    required: true
+  ca:
+    description: Base64 cluster CA cert (KUBE_CA).
+    required: true
+  token:
+    description: The app-deployer ServiceAccount token (KUBE_TOKEN).
+    required: true
+  namespace:
+    description: Target namespace (created if absent).
+    required: true
+  manifests:
+    description: Directory in the caller repo with the Cluster manifest(s) (+ optional kustomization.yaml).
+    required: false
+    default: db
+  timeout:
+    description: Passed to `kubectl wait --timeout`.
+    required: false
+    default: 600s
+
+runs:
+  using: composite
+  steps:
+    - uses: azure/setup-kubectl@v5
+
+    - name: Write kubeconfig
+      shell: bash
+      run: |
+        umask 077 && mkdir -p ~/.kube
+        cat > ~/.kube/config <<EOF
+        apiVersion: v1
+        kind: Config
+        clusters:
+          - name: homelab
+            cluster:
+              server: ${{ inputs.server }}
+              certificate-authority-data: ${{ inputs.ca }}
+        users:
+          - name: deployer
+            user:
+              token: ${{ inputs.token }}
+        contexts:
+          - name: homelab
+            context: { cluster: homelab, user: deployer, namespace: ${{ inputs.namespace }} }
+        current-context: homelab
+        EOF
+
+    - name: Apply + wait for Ready
+      shell: bash
+      env:
+        NS: ${{ inputs.namespace }}
+        SRC: ${{ inputs.manifests }}
+        TIMEOUT: ${{ inputs.timeout }}
+      run: |
+        set -euo pipefail
+        kubectl create namespace "$NS" --dry-run=client -o yaml | kubectl apply -f -
+        if [ -f "${SRC}/kustomization.yaml" ]; then
+          kubectl apply -n "$NS" -k "${SRC}"
+        else
+          kubectl apply -n "$NS" -f "${SRC}"
+        fi
+        kubectl -n "$NS" wait cluster.postgresql.cnpg.io --all --for=condition=Ready --timeout="${TIMEOUT}"
