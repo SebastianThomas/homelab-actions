@@ -37,6 +37,9 @@ jobs:
     steps:
       - uses: actions/checkout@v4
 
+      - name: Image ref            # ghcr.io needs a lowercase path
+        run: echo "IMAGE=ghcr.io/${GITHUB_REPOSITORY,,}:${GITHUB_REF_NAME}" >> "$GITHUB_ENV"
+
       - uses: docker/login-action@v3
         with:
           registry: ghcr.io
@@ -45,7 +48,7 @@ jobs:
       - uses: docker/build-push-action@v6
         with:
           push: true
-          tags: ghcr.io/${{ github.repository }}:${{ github.ref_name }}
+          tags: ${{ env.IMAGE }}
 
       - uses: SebastianThomas/homelab-actions/headscale-connect@v1
         with:
@@ -59,7 +62,7 @@ jobs:
           ca:        ${{ secrets.KUBE_CA }}
           token:     ${{ secrets.KUBE_TOKEN }}
           namespace: myapp
-          image:     ghcr.io/${{ github.repository }}:${{ github.ref_name }}
+          image:     ${{ env.IMAGE }}
 ```
 
 `deploy/` in the app repo holds `deployment.yaml` + `service.yaml` (see

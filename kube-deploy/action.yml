@@ -95,7 +95,8 @@ runs:
         if [ -f "${SRC}/kustomization.yaml" ]; then
           render() { kubectl kustomize "${SRC}"; }
         else
-          render() { cat "${SRC}"/*.yaml "${SRC}"/*.yml 2>/dev/null; }
+          # `---` before each file so plain multi-doc manifests concatenate safely.
+          render() { for f in "${SRC}"/*.yaml "${SRC}"/*.yml; do [ -e "$f" ] || continue; echo '---'; cat "$f"; done; }
         fi
         render | envsubst '$APP_IMAGE' | kubectl apply -n "${NS}" -f -
         if [ "${DO_WAIT}" = "true" ]; then
