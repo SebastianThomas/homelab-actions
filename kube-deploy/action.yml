@@ -1,20 +1,9 @@
 name: Deploy to homelab k8s
-description: >
-  Apply an app's own manifests to its namespace on the homelab cluster using a
-  namespace-scoped `deployer` ServiceAccount token, then wait for the rollout.
-  Run headscale-connect first when the cluster API is tailnet-only.
-
-    - uses: SebastianThomas/homelab-actions/kube-deploy@v1
-      with:
-        server:    ${{ secrets.KUBE_API }}
-        ca:        ${{ secrets.KUBE_CA }}
-        token:     ${{ secrets.KUBE_TOKEN }}
-        namespace: myapp
-        image:     ghcr.io/${{ github.repository }}:${{ github.ref_name }}
-
-  Manifests may contain the literal ${APP_IMAGE}; it is replaced with `image`
-  before apply. The namespace, RBAC, database and HTTPRoute are provisioned once
-  by homelab-infra (kubernetes/apps/<app>/) - this only ships the workload.
+description: >-
+  Write a kubeconfig from the shared app-deployer token, apply the app's own
+  manifests (deploy/ dir - kustomize or plain yaml, with the literal $APP_IMAGE
+  substituted for `image`), then wait for the rollout. Run headscale-connect
+  first when the cluster API is tailnet-only. Usage: see the repo README.
 
 inputs:
   server:

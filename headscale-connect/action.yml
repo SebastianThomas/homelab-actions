@@ -1,15 +1,10 @@
 name: Headscale connect
-description: >
+description: >-
   Join the Headscale tailnet on a GitHub runner so the job can reach private
-  MagicDNS names (e.g. kube-cp-01.ts.<domain>) and a tailnet-only Kubernetes
-  API. Thin wrapper over tailscale/github-action that bakes in the
-  --login-server + --accept-dns convention and a clean node name. The node is
-  ephemeral - tailscale/github-action logs it out when the job finishes.
-
-    - uses: SebastianThomas/homelab-actions/headscale-connect@v1
-      with:
-        auth-key:     ${{ secrets.TS_AUTHKEY }}
-        login-server: ${{ secrets.HEADSCALE_URL }}
+  MagicDNS names and a tailnet-only Kubernetes API. Thin wrapper over
+  tailscale/github-action that bakes in the login-server + accept-dns convention
+  and a clean node name. Ephemeral node, auto-logout on job end. Usage: see the
+  repo README.
 
 inputs:
   auth-key:
