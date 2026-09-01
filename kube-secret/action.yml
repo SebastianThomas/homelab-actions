@@ -1,10 +1,10 @@
 name: Kube secret
 description: >-
   Create/update one opaque Secret in a namespace from KEY=VALUE lines (values are
-  normally ${{ secrets.* }} passed by the caller - they never touch the repo).
+  normally GitHub secrets passed by the caller - they never touch the repo).
   Idempotent (server-side apply). Creates the namespace if missing. Run
   headscale-connect first when the cluster API is tailnet-only; run this before
-  kube-deploy so the workload can reference the Secret.
+  kube-deploy so the workload can reference the Secret. Usage: see the repo README.
 
 inputs:
   server:
