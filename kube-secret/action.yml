@@ -1,0 +1,73 @@
+name: Kube secret
+description: >-
+  Create/update one opaque Secret in a namespace from KEY=VALUE lines (values are
+  normally ${{ secrets.* }} passed by the caller - they never touch the repo).
+  Idempotent (server-side apply). Creates the namespace if missing. Run
+  headscale-connect first when the cluster API is tailnet-only; run this before
+  kube-deploy so the workload can reference the Secret.
+
+inputs:
+  server:
+    description: Kubernetes API URL (KUBE_API).
+    required: true
+  ca:
+    description: Base64 cluster CA cert (KUBE_CA).
+    required: true
+  token:
+    description: The app-deployer ServiceAccount token (KUBE_TOKEN).
+    required: true
+  namespace:
+    description: Target namespace (created if absent).
+    required: true
+  name:
+    description: Secret name.
+    required: true
+  literals:
+    description: >-
+      Multiline `KEY=VALUE` (one per line, blank lines ignored). VALUE may
+      contain `=`; only the first `=` splits.
+    required: true
+
+runs:
+  using: composite
+  steps:
+    - uses: azure/setup-kubectl@v5
+
+    - name: Write kubeconfig
+      shell: bash
+      run: |
+        umask 077 && mkdir -p ~/.kube
+        cat > ~/.kube/config <<EOF
+        apiVersion: v1
+        kind: Config
+        clusters:
+          - name: homelab
+            cluster:
+              server: ${{ inputs.server }}
+              certificate-authority-data: ${{ inputs.ca }}
+        users:
+          - name: deployer
+            user:
+              token: ${{ inputs.token }}
+        contexts:
+          - name: homelab
+            context: { cluster: homelab, user: deployer, namespace: ${{ inputs.namespace }} }
+        current-context: homelab
+        EOF
+
+    - name: Apply secret
+      shell: bash
+      env:
+        NS: ${{ inputs.namespace }}
+        NAME: ${{ inputs.name }}
+        LITERALS: ${{ inputs.literals }}
+      run: |
+        set -euo pipefail
+        kubectl create namespace "$NS" --dry-run=client -o yaml | kubectl apply -f -
+        args=()
+        while IFS= read -r line; do
+          [ -n "$line" ] || continue
+          args+=(--from-literal="$line")
+        done <<< "$LITERALS"
+        kubectl -n "$NS" create secret generic "$NAME" "${args[@]}" \
+          --dry-run=client -o yaml | kubectl apply -f -

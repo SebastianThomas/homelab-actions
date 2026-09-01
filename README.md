@@ -7,7 +7,8 @@ lives in its own repo and deploys itself; these are the shared glue.
 | Action | Does |
 |---|---|
 | [`headscale-connect`](headscale-connect/action.yml) | Join the Headscale tailnet on the runner (reach the tailnet-only API / MagicDNS). Ephemeral node, auto-logout. |
-| [`kube-deploy`](kube-deploy/action.yml) | Write a kubeconfig from a namespace-scoped SA token, `kubectl apply` the app's manifests (with `${APP_IMAGE}` substitution), wait for the rollout. |
+| [`kube-secret`](kube-secret/action.yml) | Create/update one opaque Secret in the app's namespace from `KEY=VALUE` lines (values from `${{ secrets.* }}`). Run before `kube-deploy` when the workload needs config secrets. |
+| [`kube-deploy`](kube-deploy/action.yml) | Write a kubeconfig from the shared app-deployer token, `kubectl apply` the app's `deploy/` manifests (with `${APP_IMAGE}` substitution), wait for the rollout. |
 
 Nothing here is secret — every credential is passed in as an input from the
 caller's GitHub Environment.
