@@ -1,10 +1,11 @@
 name: Headscale connect
 description: >-
   Join the Headscale tailnet on a GitHub runner so the job can reach private
-  MagicDNS names and a tailnet-only Kubernetes API. Thin wrapper over
-  tailscale/github-action that bakes in the login-server + accept-dns convention
-  and a per-run node name. Ephemeral node, auto-logout on job end. Usage: see
-  the repo README.
+  MagicDNS names and a tailnet-only Kubernetes API. Installs tailscale and runs
+  `tailscale up` directly (no tailscale/github-action wrapper - that deprecates
+  authkeys in favour of Tailscale-SaaS OAuth clients, which Headscale has no
+  equivalent for). Ephemeral node, per-run name, bounded connectivity check.
+  Usage: see the repo README.
 
 inputs:
   auth-key:
@@ -23,8 +24,9 @@ inputs:
     default: ""
   ping:
     description: >
-      MagicDNS name to `tailscale ping` right after joining, as a connectivity
-      gate (e.g. "kube-cp-01"). Empty = skip.
+      MagicDNS name to reach via `tailscale ping` right after joining, as a
+      connectivity gate (e.g. "kube-cp-01"). Fails the step after ~2 min if
+      unreachable. Empty = skip.
     required: false
     default: ""
 
@@ -48,10 +50,36 @@ runs:
         fi
         echo "hostname=$name" >> "$GITHUB_OUTPUT"
 
-    - uses: tailscale/github-action@v4
-      with:
-        authkey: ${{ inputs.auth-key }}
-        hostname: ${{ steps.cfg.outputs.hostname }}
-        # --accept-dns so the runner resolves *.ts.<domain> via MagicDNS.
-        args: --login-server=${{ inputs.login-server }} --accept-dns
-        ping: ${{ inputs.ping }}
+    - name: Join the Headscale tailnet
+      shell: bash
+      env:
+        TS_AUTHKEY: ${{ inputs.auth-key }}
+        LOGIN_SERVER: ${{ inputs.login-server }}
+        TS_HOSTNAME: ${{ steps.cfg.outputs.hostname }}
+        PING_TARGET: ${{ inputs.ping }}
+      run: |
+        set -euo pipefail
+
+        command -v tailscale >/dev/null || curl -fsSL https://tailscale.com/install.sh | sh
+
+        # Ephemeral: Headscale drops the node once this runner disconnects (the
+        # hosted VM is destroyed at job end), so there's no logout to run.
+        sudo tailscale up \
+          --login-server="$LOGIN_SERVER" \
+          --authkey="$TS_AUTHKEY" \
+          --hostname="$TS_HOSTNAME" \
+          --accept-dns \
+          --timeout=60s
+
+        [ -n "$PING_TARGET" ] || exit 0
+        echo "Waiting for $PING_TARGET over the tailnet..."
+        for _ in $(seq 1 30); do
+          if tailscale ping -c 1 --timeout 3s "$PING_TARGET" >/dev/null 2>&1; then
+            echo "$PING_TARGET reachable"; exit 0
+          fi
+          sleep 2
+        done
+        echo "::error::$PING_TARGET not reachable over the tailnet after ~2 min"
+        tailscale ping -c 1 "$PING_TARGET" || true
+        tailscale status || true
+        exit 1
