@@ -30,12 +30,27 @@ inputs:
     description: Image ref substituted for ${APP_IMAGE}. Empty = no substitution.
     required: false
     default: ""
+  images:
+    description: >
+      Multi-image apps: newline-separated NAME=ref pairs. Each NAME is exported
+      and substituted in the manifests (use ${NAME}); e.g.
+        WS_IMAGE=me/ws:v1
+        WEB_IMAGE=me/web:v1
+      Works alongside `image` (${APP_IMAGE}).
+    required: false
+    default: ""
   wait:
     description: Run `kubectl rollout status` after apply.
     required: false
     default: "true"
   rollout:
     description: Rollout target to wait on. Empty = deployment/<namespace>.
+    required: false
+    default: ""
+  rollouts:
+    description: >
+      Multi-Deployment apps: space/newline-separated rollout targets to wait on
+      (e.g. "deployment/ws deployment/web"). Overrides `rollout` when set.
     required: false
     default: ""
   rollout-timeout:
@@ -74,20 +89,34 @@ runs:
       shell: bash
       env:
         APP_IMAGE: ${{ inputs.image }}
+        IMAGES: ${{ inputs.images }}
         NS: ${{ inputs.namespace }}
         SRC: ${{ inputs.manifests }}
         DO_WAIT: ${{ inputs.wait }}
         ROLLOUT: ${{ inputs.rollout }}
+        ROLLOUTS: ${{ inputs.rollouts }}
         TIMEOUT: ${{ inputs.rollout-timeout }}
       run: |
         set -euo pipefail
+        # envsubst var allow-list: $APP_IMAGE plus every NAME from `images`
+        vars='$APP_IMAGE'
+        if [ -n "${IMAGES//[[:space:]]/}" ]; then
+          while IFS='=' read -r k v; do
+            k="${k//[[:space:]]/}"
+            [ -n "$k" ] || continue
+            export "$k=$v"
+            vars="$vars \$$k"
+          done <<< "$IMAGES"
+        fi
         if [ -f "${SRC}/kustomization.yaml" ]; then
           render() { kubectl kustomize "${SRC}"; }
         else
           # `---` before each file so plain multi-doc manifests concatenate safely.
           render() { for f in "${SRC}"/*.yaml "${SRC}"/*.yml; do [ -e "$f" ] || continue; echo '---'; cat "$f"; done; }
         fi
-        render | envsubst '$APP_IMAGE' | kubectl apply -n "${NS}" -f -
+        render | envsubst "$vars" | kubectl apply -n "${NS}" -f -
         if [ "${DO_WAIT}" = "true" ]; then
-          kubectl -n "${NS}" rollout status "${ROLLOUT:-deployment/${NS}}" --timeout="${TIMEOUT}"
+          for t in ${ROLLOUTS:-${ROLLOUT:-deployment/${NS}}}; do
+            kubectl -n "${NS}" rollout status "$t" --timeout="${TIMEOUT}"
+          done
         fi
