@@ -13,11 +13,15 @@ lives in its own repo and deploys itself; these are the shared glue.
 Nothing here is secret — every credential is passed in as an input from the
 caller's GitHub Environment.
 
-## Using it from a private repo
+## Visibility
 
-If this repo is **private**: Settings → Actions → General → **Access** →
-"Accessible from repositories owned by the user SebastianThomas". Then any repo
-you own can `uses:` it. (Public repo → nothing to configure.)
+**Keep this repo public.** Every credential is a caller-supplied input, so
+there's nothing to hide, and `uses:` then works from any repo or org with no
+setup. A *private* action repo owned by a user is only reachable from other
+repos **owned by that same user** (Settings → Actions → Access → "Accessible
+from repositories owned by …") — it will **not** resolve from a repo in an
+org, which is why some app repos live in their own orgs and hit
+"Unable to resolve action … not found".
 
 ## Example — an app repo's `.github/workflows/release.yml`
 
