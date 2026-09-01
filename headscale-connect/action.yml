@@ -3,8 +3,8 @@ description: >-
   Join the Headscale tailnet on a GitHub runner so the job can reach private
   MagicDNS names and a tailnet-only Kubernetes API. Thin wrapper over
   tailscale/github-action that bakes in the login-server + accept-dns convention
-  and a clean node name. Ephemeral node, auto-logout on job end. Usage: see the
-  repo README.
+  and a per-run node name. Ephemeral node, auto-logout on job end. Usage: see
+  the repo README.
 
 inputs:
   auth-key:
@@ -16,7 +16,9 @@ inputs:
     description: Headscale control server URL (e.g. https://headscale.example.com).
     required: true
   hostname:
-    description: Tailnet node name. Empty = gha-<repo>.
+    description: >
+      Tailnet node name. Empty = gha-<repo>-<run_id>-<attempt>, unique per run
+      so concurrent deploys from the same repo don't fight over one node.
     required: false
     default: ""
   ping:
@@ -32,8 +34,18 @@ runs:
     - id: cfg
       shell: bash
       run: |
+        set -euo pipefail
         name='${{ inputs.hostname }}'
-        [ -n "$name" ] || name="gha-${GITHUB_REPOSITORY##*/}"
+        if [ -z "$name" ]; then
+          # DNS-label-safe repo slug (lowercase, non-alnum -> '-', squeezed)
+          repo=$(printf '%s' "${GITHUB_REPOSITORY##*/}" \
+            | tr '[:upper:]' '[:lower:]' | tr -c 'a-z0-9' '-' \
+            | sed 's/-\{2,\}/-/g; s/^-//; s/-$//')
+          suffix="${GITHUB_RUN_ID}-${GITHUB_RUN_ATTEMPT}"
+          # keep the unique suffix whole; trim the repo part to fit 63 chars
+          max=$(( 63 - 4 - 1 - ${#suffix} ))
+          name="gha-${repo:0:$max}-${suffix}"
+        fi
         echo "hostname=$name" >> "$GITHUB_OUTPUT"
 
     - uses: tailscale/github-action@v4
