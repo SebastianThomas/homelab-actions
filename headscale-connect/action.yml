@@ -72,9 +72,14 @@ runs:
           sudo install -m0644 "$d/systemd/tailscaled.service"  /etc/systemd/system/tailscaled.service
           sudo install -m0644 "$d/systemd/tailscaled.defaults" /etc/default/tailscaled
           sudo mkdir -p /var/lib/tailscale
-          sudo systemctl daemon-reload
         fi
-        sudo systemctl enable --now tailscaled
+        # Avoid ML-KEM ClientHello timeouts on affected paths (tailscale/tailscale#20777).
+        sudo mkdir -p /etc/systemd/system/tailscaled.service.d
+        printf '%s\n' '[Service]' 'Environment="GODEBUG=tlsmlkem=0"' \
+          | sudo tee /etc/systemd/system/tailscaled.service.d/90-headscale-tls.conf >/dev/null
+        sudo systemctl daemon-reload
+        sudo systemctl enable tailscaled
+        sudo systemctl restart tailscaled
         for _ in $(seq 1 20); do [ -S /run/tailscale/tailscaled.sock ] && break; sleep 0.5; done
 
         # --operator so later `tailscale` CLI calls (and this step's) don't need sudo
