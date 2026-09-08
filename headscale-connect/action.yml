@@ -10,8 +10,10 @@ description: >-
 inputs:
   auth-key:
     description: >
-      Headscale pre-auth key. Create it reusable + ephemeral with a long expiry:
-        headscale preauthkeys create --user <id> --reusable --ephemeral --expiration 87600h
+      Headscale pre-auth key. Create it reusable + ephemeral with a modest expiry:
+        headscale preauthkeys create --user <id> --reusable --ephemeral --expiration 8760h
+      NOT a far-future expiry - Headscale v0.29 rejects those, and the runner
+      then fails here with a silent 120s timeout and nothing in the server log.
     required: true
   login-server:
     description: Headscale control server URL (e.g. https://headscale.example.com).
@@ -29,6 +31,16 @@ inputs:
       unreachable. Empty = skip.
     required: false
     default: ""
+  disable-mlkem:
+    description: >
+      Set GODEBUG=tlsmlkem=0 on tailscaled, shrinking its TLS ClientHello from
+      ~1.5 KB (post-quantum ML-KEM key share) to a few hundred bytes.
+      Only needed when the path to Headscale black-holes large packets - a small
+      pod MTU plus PMTU discovery broken by the ingress NAT
+      (tailscale/tailscale#20777). Fix that at the server with MSS clamping
+      instead; this is the client-side escape hatch. Leave false without evidence.
+    required: false
+    default: "false"
 
 runs:
   using: composite
@@ -57,8 +69,49 @@ runs:
         LOGIN_SERVER: ${{ inputs.login-server }}
         TS_HOSTNAME: ${{ steps.cfg.outputs.hostname }}
         PING_TARGET: ${{ inputs.ping }}
+        DISABLE_MLKEM: ${{ inputs.disable-mlkem }}
       run: |
         set -euo pipefail
+
+        # A missing/typo'd secret otherwise surfaces as an opaque 120s timeout.
+        case "$LOGIN_SERVER" in
+          https://*|http://*) ;;
+          *)
+            echo "::error::login-server must be a full URL, got '${LOGIN_SERVER:-<empty>}'."
+            echo "::error::Is the HEADSCALE_URL secret set in THIS repo? It is per-repo."
+            exit 1
+            ;;
+        esac
+
+        # Everything needed to tell the three failure modes apart:
+        #   curl 200 but tailscaled times out  -> large-packet black hole
+        #   curl fails too                     -> the path/DNS is down
+        #   request reaches Headscale, refused -> the pre-auth key
+        diagnostics() {
+          echo "::group::tailscale diagnostics"
+          echo "-- versions"
+          tailscale version 2>&1 | head -3 || true
+          echo "-- does curl reach the same endpoints tailscaled uses?"
+          curl -sS -m 10 -o /dev/null \
+            -w '   /health     -> %{http_code} in %{time_total}s via %{remote_ip}\n' \
+            "$LOGIN_SERVER/health" || echo "   /health FAILED"
+          curl -sS -m 10 -o /dev/null \
+            -w '   /key?v=142  -> %{http_code} in %{time_total}s via %{remote_ip}\n' \
+            "$LOGIN_SERVER/key?v=142" || echo "   /key FAILED"
+          host=${LOGIN_SERVER#*://}; host=${host%%/*}
+          echo "-- name resolution for $host"
+          getent ahosts "$host" || true
+          echo "-- sockets to :443 (bytes stuck in Send-Q => path MTU black hole)"
+          ss -tan state all "( dport = :443 )" 2>&1 | head -10 || true
+          echo "-- tailscaled unit overrides"
+          cat /etc/systemd/system/tailscaled.service.d/*.conf 2>/dev/null || echo "   (none)"
+          echo "-- tailscaled"
+          ls -l /dev/net/tun 2>&1 || echo "   NO /dev/net/tun"
+          systemctl --no-pager -l status tailscaled 2>&1 | head -15 || true
+          sudo tailscale status 2>&1 || true
+          sudo journalctl -u tailscaled --no-pager -n 60 || true
+          echo "::endgroup::"
+        }
 
         if ! command -v tailscale >/dev/null; then
           arch=$(dpkg --print-architecture 2>/dev/null || echo amd64)   # amd64 / arm64
@@ -73,22 +126,33 @@ runs:
           sudo install -m0644 "$d/systemd/tailscaled.defaults" /etc/default/tailscaled
           sudo mkdir -p /var/lib/tailscale
         fi
-        # Avoid ML-KEM ClientHello timeouts on affected paths (tailscale/tailscale#20777).
-        sudo mkdir -p /etc/systemd/system/tailscaled.service.d
-        printf '%s\n' '[Service]' 'Environment="GODEBUG=tlsmlkem=0"' \
-          | sudo tee /etc/systemd/system/tailscaled.service.d/90-headscale-tls.conf >/dev/null
+
+        dropin=/etc/systemd/system/tailscaled.service.d/90-headscale-tls.conf
+        if [ "$DISABLE_MLKEM" = "true" ]; then
+          echo "disabling ML-KEM in tailscaled's TLS ClientHello (disable-mlkem: true)"
+          sudo mkdir -p /etc/systemd/system/tailscaled.service.d
+          printf '%s\n' '[Service]' 'Environment="GODEBUG=tlsmlkem=0"' \
+            | sudo tee "$dropin" >/dev/null
+        else
+          sudo rm -f "$dropin"
+        fi
         sudo systemctl daemon-reload
-        sudo systemctl enable tailscaled
+        sudo systemctl enable --now tailscaled
         sudo systemctl restart tailscaled
         for _ in $(seq 1 20); do [ -S /run/tailscale/tailscaled.sock ] && break; sleep 0.5; done
 
         # --operator so later `tailscale` CLI calls (and this step's) don't need sudo
-        sudo tailscale up \
+        if ! sudo tailscale up \
           --login-server="$LOGIN_SERVER" \
           --authkey="$TS_AUTHKEY" \
           --hostname="$TS_HOSTNAME" \
           --operator="${USER:-runner}" \
           --timeout=120s
+        then
+          echo "::error::tailscale up failed - see the diagnostics group below"
+          diagnostics
+          exit 1
+        fi
 
         [ -n "$PING_TARGET" ] || exit 0
         echo "Waiting for $PING_TARGET over the tailnet..."
@@ -97,5 +161,5 @@ runs:
           sleep 2
         done
         echo "::error::$PING_TARGET not reachable over the tailnet after ~2 min"
-        tailscale status || true
+        diagnostics
         exit 1

@@ -6,7 +6,7 @@ lives in its own repo and deploys itself; these are the shared glue.
 
 | Action | Does |
 |---|---|
-| [`headscale-connect`](headscale-connect/action.yml) | Join the Headscale tailnet on the runner (reach the tailnet-only API / MagicDNS). Direct `tailscale up` (no SaaS-oriented wrapper). Ephemeral node, per-run name (`gha-<repo>-<run_id>-<attempt>`) so concurrent deploys don't collide; the ping gate fails fast (~2 min) instead of hanging. |
+| [`headscale-connect`](headscale-connect/action.yml) | Join the Headscale tailnet on the runner (reach the tailnet-only API / MagicDNS). Direct `tailscale up` (no SaaS-oriented wrapper). Ephemeral node, per-run name (`gha-<repo>-<run_id>-<attempt>`) so concurrent deploys don't collide; the ping gate fails fast (~2 min) instead of hanging. On failure it dumps diagnostics — see [Debugging a failed join](#debugging-a-failed-join). |
 | [`kube-secret`](kube-secret/action.yml) | Create/update one opaque Secret in the app's namespace from `KEY=VALUE` lines (values from `${{ secrets.* }}`). Run before `kube-deploy` when the workload needs config secrets. |
 | [`kube-deploy`](kube-deploy/action.yml) | Write a kubeconfig from the shared app-deployer token, `kubectl apply` the app's `deploy/` manifests (with `${APP_IMAGE}` substitution), wait for the rollout. |
 | [`cnpg-cluster`](cnpg-cluster/action.yml) | Apply a CloudNativePG `Cluster` manifest (a `db/` dir) and wait for it to report Ready. Deliberately separate from `kube-deploy` — DB provisioning never rides along with an app deploy. |
@@ -83,9 +83,39 @@ jobs:
 | `KUBE_CA` | `kubectl -n <ns> get secret deployer-token -o jsonpath='{.data.ca\.crt}'` |
 | `KUBE_TOKEN` | `kubectl -n <ns> get secret deployer-token -o jsonpath='{.data.token}' \| base64 -d` |
 | `HEADSCALE_URL` | `https://headscale.homelab.sthomas.ch` |
-| `TS_AUTHKEY` | `headscale preauthkeys create --user <id> --reusable --ephemeral --expiration 100y` |
+| `TS_AUTHKEY` | `headscale preauthkeys create --user <id> --reusable --ephemeral --expiration 8760h` |
+
+> **Not `100y`.** Headscale v0.29 rejects pre-auth keys with far-future
+> expirations. Already-registered nodes keep working, so nothing looks broken —
+> but every *new* runner then fails at `headscale-connect` with a silent 120 s
+> timeout and **nothing in the Headscale log**. Use `8760h` (1 year) and rotate.
+>
+> `TS_AUTHKEY` is **per-repo**. Rotating it means updating every app repo, or
+> promoting it to an org-level secret so there is one place to change.
+
+## Debugging a failed join
+
+`headscale-connect` prints a `tailscale diagnostics` group when `tailscale up`
+or the ping gate fails. Read it top-down — the three failure modes look
+identical from the outside but are distinguished by the first two lines:
+
+| Symptom in the group | Cause |
+|---|---|
+| `curl /health -> 200` fast, but `tailscale up` timed out, and `ss` shows connections in `FIN-WAIT-1` with bytes stuck in `Send-Q` | **Large-packet black hole.** tailscale's post-quantum ClientHello (~1.5 KB) exceeds the pod-network MTU on the ingress path and the "fragmentation needed" ICMP is lost in the ingress NAT. Fix at the server with MSS clamping (homelab-infra's `pod-mss-clamp`); `disable-mlkem: true` is the client-side stopgap. |
+| `curl /health FAILED` too, or `getent ahosts` returns nothing | The path or DNS to Headscale is down — not a tailscale problem. |
+| Everything reachable, and the **Headscale server log shows the registration arriving** | The pre-auth key: expired, revoked, or issued for a user that no longer exists. |
+
+If the server log shows *no* request at all, the runner never reached Headscale —
+so it is never the key. Check the first two rows.
 
 ## Versioning
 
 Tag `v1`, `v1.0.0`, … and move the `v1` major tag forward on compatible changes.
 Consumers pin `@v1`.
+
+**Moving `v1` is what actually ships a change** — app repos pin `@v1`, so a
+merged commit does nothing until the tag moves:
+
+```bash
+git tag -fa v1 -m "v1 -> $(git rev-parse --short HEAD)" && git push -f origin v1
+```
